@@ -24,7 +24,7 @@ deploy LLM models, and configure them for use in Visual Studio Code with GitHub 
 | Requirement | Notes |
 |---|---|
 | [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) >= 2.60 | Must be on your `PATH` |
-| PowerShell 7+ (`pwsh`) | Windows, macOS, or Linux |
+| PowerShell 7+ (`pwsh`) | Windows, macOS, or Linux — check with `$PSVersionTable.PSVersion` |
 | Azure subscription | Contributor or Owner role required |
 | Azure AI / Cognitive Services quota | Request at https://aka.ms/oai/access if needed |
 | `az ml` CLI extension | Auto-installed by the script if creating a Foundry Hub |
@@ -40,6 +40,17 @@ Run from the `azure-deploy` folder:
 ```
 
 All values are discovered interactively - no parameters are required.
+
+> **Execution Policy error?** If you see a message like *"cannot be loaded because running
+> scripts is disabled on this system"*, your PowerShell execution policy is blocking the script.
+> Run the following command to allow it for the current session only:
+>
+> ```powershell
+> Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+> ```
+>
+> Then re-run `.\deploy.ps1`. This change applies only to the current PowerShell window and
+> does not affect system-wide settings.
 
 ---
 
