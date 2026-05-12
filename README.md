@@ -33,17 +33,28 @@ deploy LLM models, and configure them for use in Visual Studio Code with GitHub 
 
 ## Quick Start
 
-Run from the `azure-deploy` folder:
+Run from the `azure-deploy` folder **using `pwsh`** (PowerShell 7+):
 
 ```powershell
+pwsh
+cd azure-deploy
 .\deploy.ps1
 ```
 
 All values are discovered interactively - no parameters are required.
 
-> **Execution Policy error?** If you see a message like *"cannot be loaded because running
-> scripts is disabled on this system"*, your PowerShell execution policy is blocking the script.
-> Run the following command to allow it for the current session only:
+> **⚠ Important: use `pwsh`, not `powershell`.**
+> The `powershell` command launches **Windows PowerShell 5.1**, even if PowerShell 7 is
+> installed side-by-side. The script requires PowerShell 7+ syntax and will fail with parse
+> errors under 5.1. Always start your session with `pwsh` or run:
+>
+> ```powershell
+> pwsh -ExecutionPolicy Bypass -File .\deploy.ps1
+> ```
+
+> **Execution Policy error?** If you see *"cannot be loaded because running
+> scripts is disabled on this system"*, run the following to allow it for the current
+> session only:
 >
 > ```powershell
 > Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass

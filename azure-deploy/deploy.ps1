@@ -1,3 +1,5 @@
+#Requires -Version 7.0
+
 param(
     # If omitted you will be prompted after region/model selection
     [Parameter(Mandatory=$false)]
@@ -78,7 +80,7 @@ $createNewHub   = $false
 $newHubName     = ''
 $newProjectName = ''
 if ($foundryHubs.Count -eq 0) {
-    Write-Host "No Foundry Hubs found in this subscription."
+    Write-Host "No Foundry Hubs found in this subscription (existing AI Services accounts will be checked next)."
     Write-Host ""
     $hubCreate = Read-Host "Create a new Azure AI Foundry Hub and Project? (Y/N)"
     if ($hubCreate -match '^[Yy]$') {
@@ -89,7 +91,7 @@ if ($foundryHubs.Count -eq 0) {
         if ($newProjectName -eq '') { Write-Error "Project name is required."; exit 1 }
         Write-Host "Will create Hub '$newHubName' and Project '$newProjectName' after model deployment."
     } else {
-        Write-Host "Continuing without a Hub. AI Services will be standalone."
+        Write-Host "Skipping Hub creation. Will check for existing AI Services accounts next."
     }
 } else {
     Write-Host ""
@@ -318,6 +320,71 @@ if ($ModelName -eq '') {
     Write-Host "Model '$ModelName'  Format: $ModelFormat  SKU: $DeploymentSkuName  Version: $ModelVersion"
 }
 
+# ── Check available quota ─────────────────────────────────────────────────────
+$checkLocation = if ($useExistingAccount -and $Location -eq '') {
+    ($aiServicesAccounts | Where-Object { $_.name -eq $aiServicesName } | Select-Object -First 1).location
+} else { $Location }
+
+if ($checkLocation) {
+    Write-Host ""
+    Write-Host "Checking quota for '$ModelName' ($DeploymentSkuName) in '$checkLocation'..."
+    $quotaUsages = $null
+    $quotaRaw = az rest --method get `
+        --url "https://management.azure.com/subscriptions/$($selectedSubscription.id)/providers/Microsoft.CognitiveServices/locations/$checkLocation/usages?api-version=2024-10-01" `
+        --output json 2>$null | ConvertFrom-Json
+    if ($quotaRaw -and $quotaRaw.value) {
+        $quotaUsages = $quotaRaw.value
+    }
+
+    $quotaAvailable  = $true
+    $quotaChecked    = $false
+    if ($quotaUsages) {
+        # Match quota entries — Azure names them like "OpenAI.Standard.gpt-4o" or similar
+        $matchedQuota = @($quotaUsages | Where-Object {
+            $_.name.value -match [regex]::Escape($ModelName) -or
+            $_.name.localizedValue -match [regex]::Escape($ModelName)
+        })
+        if ($matchedQuota.Count -gt 0) {
+            $quotaChecked = $true
+            foreach ($q in $matchedQuota) {
+                $remaining = $q.limit - $q.currentValue
+                Write-Host "  Quota: $($q.name.localizedValue)"
+                Write-Host "    Current usage : $($q.currentValue) / $($q.limit) ($($q.unit))"
+                Write-Host "    Remaining     : $remaining"
+                if ($remaining -lt $DeploymentCapacity) {
+                    $quotaAvailable = $false
+                    Write-Host ""
+                    Write-Host "  WARNING: Insufficient quota! Need $DeploymentCapacity but only $remaining available." -ForegroundColor Yellow
+                }
+            }
+        } else {
+            Write-Host "  No specific quota entry found for '$ModelName'. Azure will validate during deployment."
+        }
+    } else {
+        Write-Host "  Could not retrieve quota info. Proceeding with deployment (Azure will validate)."
+    }
+
+    if (-not $quotaAvailable) {
+        Write-Host ""
+        Write-Host "You can request a quota increase at:" -ForegroundColor Yellow
+        Write-Host "  https://portal.azure.com/#view/Microsoft_Azure_Capacity/QuotaMenuBlade/~/myQuotas" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "Steps:" -ForegroundColor Yellow
+        Write-Host "  1. Open the link above and sign in to Azure Portal"
+        Write-Host "  2. Select provider 'Azure AI Services' (or 'Cognitive Services')"
+        Write-Host "  3. Find '$ModelName' in region '$checkLocation'"
+        Write-Host "  4. Click 'Request increase' and enter the capacity you need"
+        Write-Host ""
+        $continueAnyway = Read-Host "Continue with deployment anyway? (Y/N)"
+        if ($continueAnyway -notmatch '^[Yy]$') {
+            Write-Host "Exiting. Request quota and re-run the script."
+            exit 0
+        }
+    } elseif ($quotaChecked) {
+        Write-Host "  Quota OK." -ForegroundColor Green
+    }
+}
+
 # ── Resource group (new account only) ────────────────────────────────────────
 if (-not $useExistingAccount) {
     if ($ResourceGroupName -eq '') {
@@ -354,8 +421,9 @@ if ($useExistingAccount) {
     )
     if ($ModelVersion -ne '') { $deployArgs += '--model-version'; $deployArgs += $ModelVersion }
 
-    az cognitiveservices account deployment create @deployArgs --output none
+    $deployErrorText = az cognitiveservices account deployment create @deployArgs --output none 2>&1 | Out-String
     $deploySuccess = ($LASTEXITCODE -eq 0)
+    if (-not $deploySuccess) { Write-Host $deployErrorText }
 
     $openAIEndpoint = "https://$aiServicesName.openai.azure.com/"
     $aiEndpoint     = "https://$aiServicesName.services.ai.azure.com/"
@@ -373,14 +441,15 @@ if ($useExistingAccount) {
     )
     if ($ModelVersion -ne '') { $deployParams += "modelVersion=$ModelVersion" }
 
-    az deployment group create `
+    $deployErrorText = az deployment group create `
         --resource-group $aiServicesRG `
         --template-file "$PSScriptRoot\deploy.bicep" `
         --parameters $deployParams `
-        --output json | Tee-Object -Variable deployOutput
-
+        --output json 2>&1 | Out-String
     $deploySuccess = ($LASTEXITCODE -eq 0)
+    if (-not $deploySuccess) { Write-Host $deployErrorText }
     if ($deploySuccess) {
+        $deployOutput = $deployErrorText
         $result         = $deployOutput | ConvertFrom-Json
         $aiEndpoint     = $result.properties.outputs.aiServicesEndpoint.value
         $openAIEndpoint = $result.properties.outputs.openAICompatibleEndpoint.value
@@ -559,6 +628,25 @@ api_key: $apiKey
     Write-Host "  (\`${input:chat.lm.secret.XXXX}) for better security, or paste"
     Write-Host "  the key directly for quick testing."
 } else {
-    Write-Error "Deployment failed. Check the error messages above."
+    $isQuotaError = $deployErrorText -match 'quota|InsufficientQuota|OutOfCapacity|SkuNotAvailable|capacity.*exceeded|not enough capacity'
+    if ($isQuotaError) {
+        Write-Host ""
+        Write-Error "Deployment failed due to insufficient quota or capacity."
+        Write-Host ""
+        Write-Host "Request a quota increase at:" -ForegroundColor Yellow
+        Write-Host "  https://portal.azure.com/#view/Microsoft_Azure_Capacity/QuotaMenuBlade/~/myQuotas" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "Steps:" -ForegroundColor Yellow
+        Write-Host "  1. Open the link above and sign in to Azure Portal"
+        Write-Host "  2. Select provider 'Azure AI Services' (or 'Cognitive Services')"
+        Write-Host "  3. Find '$ModelName' in region '$Location'"
+        Write-Host "  4. Click 'Request increase' and enter the capacity you need"
+        Write-Host "  5. Once approved, re-run this script"
+        Write-Host ""
+        Write-Host "Alternatively, try a lower capacity (current: $DeploymentCapacity):" -ForegroundColor Yellow
+        Write-Host "  pwsh .\deploy.ps1 -DeploymentCapacity 1"
+    } else {
+        Write-Error "Deployment failed. Check the error messages above."
+    }
     exit 1
 }
